@@ -1,28 +1,50 @@
-// DESAFIO: Sistema de Monitoramento de Ações na Bolsa
-// PROBLEMA: Um sistema financeiro precisa notificar múltiplos investidores quando o preço
-// de ações muda. O código atual faz polling constante ou tem dependências diretas entre
-// as ações e os investidores, criando acoplamento forte e código difícil de manter
-
 using System;
 using System.Collections.Generic;
 using System.Threading;
 
 namespace DesignPatternChallenge
 {
-    // Contexto: Sistema de trading onde investidores querem ser notificados de mudanças
-    // em tempo real sem ter que ficar consultando constantemente (polling)
-    
+    // ============================
+    // EVENTO / DADOS DA NOTIFICAÇÃO
+    // ============================
+    public class StockPriceChanged
+    {
+        public string Symbol { get; }
+        public decimal OldPrice { get; }
+        public decimal NewPrice { get; }
+        public decimal ChangePercent { get; }
+        public DateTime Timestamp { get; }
+
+        public StockPriceChanged(string symbol, decimal oldPrice, decimal newPrice, DateTime timestamp)
+        {
+            Symbol = symbol;
+            OldPrice = oldPrice;
+            NewPrice = newPrice;
+            Timestamp = timestamp;
+
+            // Proteção: evita divisão por zero
+            ChangePercent = oldPrice == 0 ? 0 : ((newPrice - oldPrice) / oldPrice) * 100m;
+        }
+    }
+
+    // ============================
+    // OBSERVER (ASSINANTE)
+    // ============================
+    public interface IStockObserver
+    {
+        void OnPriceChanged(StockPriceChanged evt);
+    }
+
+    // ============================
+    // SUBJECT (PUBLICADOR)
+    // ============================
     public class Stock
     {
-        public string Symbol { get; set; }
+        public string Symbol { get; }
         public decimal Price { get; private set; }
         public DateTime LastUpdate { get; private set; }
 
-        // Problema: Referências diretas para investidores (acoplamento forte)
-        private Investor _investor1;
-        private Investor _investor2;
-        private MobileApp _mobileApp;
-        private TradingBot _tradingBot;
+        private readonly List<IStockObserver> _observers = new List<IStockObserver>();
 
         public Stock(string symbol, decimal initialPrice)
         {
@@ -31,74 +53,66 @@ namespace DesignPatternChallenge
             LastUpdate = DateTime.Now;
         }
 
-        // Problema: Métodos para registrar cada tipo de observador
-        public void RegisterInvestor1(Investor investor)
+        public void Subscribe(IStockObserver observer)
         {
-            _investor1 = investor;
+            if (observer == null) return;
+            if (_observers.Contains(observer)) return;
+
+            _observers.Add(observer);
+            Console.WriteLine($"[{Symbol}] ✅ Novo assinante: {observer.GetType().Name}");
         }
 
-        public void RegisterInvestor2(Investor investor)
+        public void Unsubscribe(IStockObserver observer)
         {
-            _investor2 = investor;
-        }
+            if (observer == null) return;
 
-        public void RegisterMobileApp(MobileApp app)
-        {
-            _mobileApp = app;
-        }
-
-        public void RegisterTradingBot(TradingBot bot)
-        {
-            _tradingBot = bot;
+            if (_observers.Remove(observer))
+            {
+                Console.WriteLine($"[{Symbol}] ❎ Assinante removido: {observer.GetType().Name}");
+            }
         }
 
         public void UpdatePrice(decimal newPrice)
         {
-            if (Price != newPrice)
-            {
-                decimal oldPrice = Price;
-                Price = newPrice;
-                LastUpdate = DateTime.Now;
-                
-                decimal changePercent = ((newPrice - oldPrice) / oldPrice) * 100;
-                
-                Console.WriteLine($"\n[{Symbol}] Preço atualizado: R$ {oldPrice:N2} → R$ {newPrice:N2} ({changePercent:+0.00;-0.00}%)");
+            if (Price == newPrice) return;
 
-                // Problema: Precisa notificar cada observador manualmente
-                // e conhecer o tipo específico de cada um
-                if (_investor1 != null)
-                {
-                    _investor1.OnPriceChanged(Symbol, newPrice, changePercent);
-                }
+            var oldPrice = Price;
+            Price = newPrice;
+            LastUpdate = DateTime.Now;
 
-                if (_investor2 != null)
-                {
-                    _investor2.OnPriceChanged(Symbol, newPrice, changePercent);
-                }
+            var evt = new StockPriceChanged(Symbol, oldPrice, newPrice, LastUpdate);
 
-                if (_mobileApp != null)
-                {
-                    _mobileApp.SendPushNotification(Symbol, newPrice, changePercent);
-                }
+            Console.WriteLine($"\n[{Symbol}] Preço atualizado: R$ {oldPrice:N2} → R$ {newPrice:N2} ({evt.ChangePercent:+0.00;-0.00}%)");
 
-                if (_tradingBot != null)
-                {
-                    _tradingBot.AnalyzeAndTrade(Symbol, newPrice, changePercent);
-                }
-
-                // Problema: Adicionar novo tipo de observador = modificar esta classe
-                // Viola Open/Closed Principle
-            }
+            NotifyAll(evt);
         }
 
-        // Problema: Não há forma de remover observadores dinamicamente
-        // Problema: Não suporta múltiplos observadores do mesmo tipo
+        private void NotifyAll(StockPriceChanged evt)
+        {
+            // Faz uma cópia pra evitar erro caso alguém se desinscreva durante a notificação
+            var snapshot = _observers.ToArray();
+
+            foreach (var observer in snapshot)
+            {
+                try
+                {
+                    observer.OnPriceChanged(evt);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"  → [Erro ao notificar {observer.GetType().Name}] {ex.Message}");
+                }
+            }
+        }
     }
 
-    public class Investor
+    // ============================
+    // OBSERVERS CONCRETOS
+    // ============================
+    public class Investor : IStockObserver
     {
-        public string Name { get; set; }
-        public decimal AlertThreshold { get; set; }
+        public string Name { get; }
+        public decimal AlertThreshold { get; } // em %
 
         public Investor(string name, decimal alertThreshold)
         {
@@ -106,37 +120,37 @@ namespace DesignPatternChallenge
             AlertThreshold = alertThreshold;
         }
 
-        public void OnPriceChanged(string symbol, decimal price, decimal changePercent)
+        public void OnPriceChanged(StockPriceChanged evt)
         {
-            Console.WriteLine($"  → [Investidor {Name}] Notificado sobre {symbol}");
-            
-            if (Math.Abs(changePercent) >= AlertThreshold)
+            Console.WriteLine($"  → [Investidor {Name}] Notificado sobre {evt.Symbol}");
+
+            if (Math.Abs(evt.ChangePercent) >= AlertThreshold)
             {
-                Console.WriteLine($"  → [Investidor {Name}] ⚠️ ALERTA! Mudança de {changePercent:+0.00;-0.00}% excedeu limite de {AlertThreshold}%");
+                Console.WriteLine($"  → [Investidor {Name}] ⚠️ ALERTA! Mudança de {evt.ChangePercent:+0.00;-0.00}% excedeu limite de {AlertThreshold}%");
             }
         }
     }
 
-    public class MobileApp
+    public class MobileApp : IStockObserver
     {
-        public string UserId { get; set; }
+        public string UserId { get; }
 
         public MobileApp(string userId)
         {
             UserId = userId;
         }
 
-        public void SendPushNotification(string symbol, decimal price, decimal changePercent)
+        public void OnPriceChanged(StockPriceChanged evt)
         {
-            Console.WriteLine($"  → [App Mobile {UserId}] 📱 Push: {symbol} agora em R$ {price:N2} ({changePercent:+0.00;-0.00}%)");
+            Console.WriteLine($"  → [App Mobile {UserId}] 📱 Push: {evt.Symbol} agora em R$ {evt.NewPrice:N2} ({evt.ChangePercent:+0.00;-0.00}%)");
         }
     }
 
-    public class TradingBot
+    public class TradingBot : IStockObserver
     {
-        public string BotName { get; set; }
-        public decimal BuyThreshold { get; set; }
-        public decimal SellThreshold { get; set; }
+        public string BotName { get; }
+        public decimal BuyThreshold { get; }  // compra quando cai X%
+        public decimal SellThreshold { get; } // vende quando sobe X%
 
         public TradingBot(string botName, decimal buyThreshold, decimal sellThreshold)
         {
@@ -145,111 +159,78 @@ namespace DesignPatternChallenge
             SellThreshold = sellThreshold;
         }
 
-        public void AnalyzeAndTrade(string symbol, decimal price, decimal changePercent)
+        public void OnPriceChanged(StockPriceChanged evt)
         {
-            Console.WriteLine($"  → [Bot {BotName}] 🤖 Analisando {symbol}...");
-            
-            if (changePercent <= -BuyThreshold)
+            Console.WriteLine($"  → [Bot {BotName}] 🤖 Analisando {evt.Symbol}...");
+
+            if (evt.ChangePercent <= -BuyThreshold)
             {
-                Console.WriteLine($"  → [Bot {BotName}] 💰 COMPRANDO {symbol} por R$ {price:N2}");
+                Console.WriteLine($"  → [Bot {BotName}] 💰 COMPRANDO {evt.Symbol} por R$ {evt.NewPrice:N2}");
             }
-            else if (changePercent >= SellThreshold)
+            else if (evt.ChangePercent >= SellThreshold)
             {
-                Console.WriteLine($"  → [Bot {BotName}] 💸 VENDENDO {symbol} por R$ {price:N2}");
+                Console.WriteLine($"  → [Bot {BotName}] 💸 VENDENDO {evt.Symbol} por R$ {evt.NewPrice:N2}");
             }
         }
     }
 
-    // Alternativa problemática: Polling
-    public class StockMonitor
+    // Opcional: logger central (exemplo de “novo observador” sem mexer em Stock)
+    public class AuditLogger : IStockObserver
     {
-        private Stock _stock;
-        private decimal _lastKnownPrice;
-
-        public StockMonitor(Stock stock)
+        public void OnPriceChanged(StockPriceChanged evt)
         {
-            _stock = stock;
-            _lastKnownPrice = stock.Price;
+            Console.WriteLine($"  → [Audit] {evt.Timestamp:HH:mm:ss} {evt.Symbol}: {evt.OldPrice:N2} → {evt.NewPrice:N2}");
         }
-
-        public void StartPolling()
-        {
-            // Problema: Polling constante desperdiça recursos
-            while (true)
-            {
-                Thread.Sleep(1000); // Verifica a cada segundo
-                
-                if (_stock.Price != _lastKnownPrice)
-                {
-                    Console.WriteLine($"Mudança detectada por polling!");
-                    _lastKnownPrice = _stock.Price;
-                    // Como notificar múltiplos interessados?
-                }
-            }
-        }
-
-        // Problema: Latência (atraso de até 1 segundo)
-        // Problema: Desperdício de CPU verificando constantemente
-        // Problema: Não escala para milhares de ações
     }
 
+    // ============================
+    // DEMO
+    // ============================
     class Program
     {
         static void Main(string[] args)
         {
-            Console.WriteLine("=== Sistema de Monitoramento de Ações ===");
+            Console.WriteLine("=== Sistema de Monitoramento de Ações (Observer) ===");
 
             var petr4 = new Stock("PETR4", 35.50m);
 
-            // Problema: Precisa registrar cada observador individualmente
             var investor1 = new Investor("João Silva", 3.0m);
             var investor2 = new Investor("Maria Santos", 5.0m);
+            var investor3 = new Investor("Pedro Marques", 2.0m); // agora dá pra ter quantos quiser
+
             var mobileApp = new MobileApp("user123");
             var tradingBot = new TradingBot("AlgoTrader", 2.0m, 2.5m);
+            var audit = new AuditLogger();
 
-            petr4.RegisterInvestor1(investor1);
-            petr4.RegisterInvestor2(investor2);
-            petr4.RegisterMobileApp(mobileApp);
-            petr4.RegisterTradingBot(tradingBot);
+            // ✅ Um único método para qualquer tipo de observador
+            petr4.Subscribe(investor1);
+            petr4.Subscribe(investor2);
+            petr4.Subscribe(investor3);
+            petr4.Subscribe(mobileApp);
+            petr4.Subscribe(tradingBot);
+            petr4.Subscribe(audit);
 
-            // Simulando mudanças de preço
             Console.WriteLine("\n=== Movimentações do Mercado ===");
-            
+
             petr4.UpdatePrice(36.20m); // +1.97%
-            Thread.Sleep(500);
-            
+            Thread.Sleep(300);
+
             petr4.UpdatePrice(37.50m); // +3.59%
-            Thread.Sleep(500);
-            
+            Thread.Sleep(300);
+
+            // ✅ Remoção dinâmica
+            Console.WriteLine("\n=== Removendo um observador (Investor2) ===");
+            petr4.Unsubscribe(investor2);
+
             petr4.UpdatePrice(35.00m); // -6.67%
-            Thread.Sleep(500);
+            Thread.Sleep(300);
 
-            // Problema: Como adicionar um terceiro investidor?
-            // Precisaria adicionar _investor3 na classe Stock!
-            
-            // Problema: Como remover observadores?
-            // Não há método de unregister!
-
-            Console.WriteLine("\n=== PROBLEMAS ===");
-            Console.WriteLine("✗ Acoplamento forte entre Stock e observadores específicos");
-            Console.WriteLine("✗ Stock precisa conhecer cada tipo de observador");
-            Console.WriteLine("✗ Adicionar novo observador = modificar classe Stock");
-            Console.WriteLine("✗ Não suporta múltiplos observadores do mesmo tipo facilmente");
-            Console.WriteLine("✗ Não há forma de remover observadores dinamicamente");
-            Console.WriteLine("✗ Difícil adicionar novos tipos de notificação");
-            Console.WriteLine("✗ Viola Open/Closed Principle");
-
-            Console.WriteLine("\n=== Alternativa de Polling - Problemas ===");
-            Console.WriteLine("✗ Latência (atraso entre mudança e detecção)");
-            Console.WriteLine("✗ Desperdício de recursos (verificações constantes)");
-            Console.WriteLine("✗ Não escala (milhares de ações × verificações por segundo)");
-            Console.WriteLine("✗ Dificulta implementação de notificações em tempo real");
-
-            // Perguntas para reflexão:
-            // - Como desacoplar objeto observado dos observadores?
-            // - Como notificar múltiplos objetos automaticamente?
-            // - Como permitir subscrição/cancelamento dinâmico?
-            // - Como criar dependência um-para-muitos desacoplada?
+            Console.WriteLine("\n=== O que foi resolvido ===");
+            Console.WriteLine("✓ Stock não conhece Investor/MobileApp/TradingBot");
+            Console.WriteLine("✓ Adicionar observador novo não exige alterar Stock (OCP ok)");
+            Console.WriteLine("✓ Suporta N observadores do mesmo tipo");
+            Console.WriteLine("✓ Subscribe/Unsubscribe dinâmicos");
+            Console.WriteLine("✓ Sem polling (event-driven)");
         }
     }
 }
